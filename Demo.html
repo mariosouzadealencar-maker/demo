@@ -1,0 +1,523 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1.0" />
+<title>Procedural Avançado — Espírito Primordial</title>
+<style>
+  html,body{margin:0;padding:0;height:100%;overflow:hidden;font-family:Inter,Segoe UI,Arial,sans-serif;background:#000;}
+  canvas{display:block}
+  #hud{
+    position:absolute; left:12px; top:12px;
+    background:rgba(0,0,0,0.45); color:#fff; padding:10px 14px;
+    border-radius:10px; backdrop-filter: blur(4px);
+    min-width:260px; z-index:30;
+  }
+  #hud .title{font-weight:700;margin-bottom:6px}
+  #xpbar{width:220px;height:12px;background:#2a2a2a;border-radius:8px;overflow:hidden}
+  #xpfill{height:100%;width:0%;background:linear-gradient(90deg,#7dd3fc,#a78bfa);transition:width 0.35s ease}
+  #notif{
+    position:absolute;right:12px;top:12px;color:#fff;
+    background:rgba(0,0,0,0.35);padding:10px 14px;border-radius:10px;
+    transform-origin:center; font-weight:700;display:none;z-index:30;
+  }
+  #overlay{
+    position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+    background:linear-gradient(180deg, rgba(0,0,0,0.6), rgba(0,0,0,0.25));
+    z-index:40; color:#fff; flex-direction:column;
+  }
+  #overlay .card{background:rgba(0,0,0,0.55);padding:24px;border-radius:12px;text-align:center;max-width:480px}
+  #overlay button{margin-top:12px;padding:10px 16px;border-radius:8px;border:0;background:#60a5fa;color:#012;font-weight:800;cursor:pointer}
+  #overlay .hint{margin-top:8px;font-size:13px;color:#cbd5e1}
+  @media (max-width:520px){
+    #hud{left:8px;top:8px;padding:8px}
+    #xpbar{width:160px}
+  }
+</style>
+</head>
+<body>
+  <div id="hud">
+    <div class="title">✨ Espírito Primordial</div>
+    <div>Fase: <span id="fase">Carregando...</span></div>
+    <div style="margin-top:8px">XP: <span id="xptext">0</span> / <span id="xpmax">0</span></div>
+    <div id="xpbar" style="margin-top:8px"><div id="xpfill"></div></div>
+    <div style="margin-top:8px;font-size:13px;color:#cbd5e1">WASD ou setas para mover • Coletar orbes</div>
+  </div>
+  <div id="notif">Evoluiu!</div>
+
+  <div id="overlay">
+    <div class="card">
+      <h2>Demo: Espírito Primordial</h2>
+      <p>Controle uma entidade energética que vai ganhando forma e luz ao coletar orbes.</p>
+      <button id="startBtn">Iniciar</button>
+      <div class="hint">Toque/Click para ativar áudio se necessário</div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/three@0.152.2/build/three.min.js"></script>
+  <script>
+/* -------------------------
+   Espírito Primordial — Full HTML + JS
+   Author: gerado pelo ChatGPT
+   ------------------------- */
+
+let scene, camera, renderer, clock;
+let player, velocity, directionVec;
+let orbs = [];
+let particleSystem;
+let instancedParticleCount = 500;
+let particlePool = { positions: [], velocities: [], lifetimes: [], scales: [] };
+let keys = {};
+let currentPhase = 0, xp = 0, nextXP = 20;
+let running = false;
+let dirLight, hemi;
+let audioCtx, masterGain, ambientOsc;
+
+/* fases do espírito:
+   0 -> Fagulha (pequena chama pulsante)
+   1 -> Forma Etérea (humanoide translúcido)
+   2 -> Avatar de Luz (corpo de pura energia, muito emissivo)
+*/
+const phases = [
+  { geometry: new THREE.ConeGeometry(0.6, 1.2, 12), color:0xff8a50, name:"Fagulha" },
+  { geometry: new THREE.CapsuleGeometry(0.5, 1.2, 4, 8), color:0x9b7cff, name:"Forma Etérea" },
+  { geometry: new THREE.SphereGeometry(1.1, 24, 24), color:0x7efcff, name:"Avatar de Luz" }
+];
+
+const accel = 0.06, maxSpeed = 0.45, friction = 0.92;
+const cameraOffset = new THREE.Vector3(0,2.4,-5);
+
+const faseEl = document.getElementById('fase');
+const xptextEl = document.getElementById('xptext');
+const xpmaxEl = document.getElementById('xpmax');
+const xpfillEl = document.getElementById('xpfill');
+const notifEl = document.getElementById('notif');
+const overlay = document.getElementById('overlay');
+const startBtn = document.getElementById('startBtn');
+
+init();
+
+function init(){
+  scene = new THREE.Scene();
+  scene.fog = new THREE.Fog(0x0b1020, 10, 120); // mais escuro inicialmente
+
+  camera = new THREE.PerspectiveCamera(65, window.innerWidth/window.innerHeight, 0.1, 1000);
+  camera.position.set(0,3,8);
+
+  renderer = new THREE.WebGLRenderer({ antialias:true });
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  document.body.appendChild(renderer.domElement);
+
+  clock = new THREE.Clock();
+
+  // chão simples — mas com leve brilho e grama escura
+  const groundMat = new THREE.MeshStandardMaterial({ color:0x08120a, roughness:0.9, metalness:0.05 });
+  const groundGeo = new THREE.PlaneGeometry(400,400, 8,8);
+  const ground = new THREE.Mesh(groundGeo, groundMat);
+  ground.rotation.x = -Math.PI/2; ground.receiveShadow = true;
+  scene.add(ground);
+
+  // Céu leve (cor ajustada por fase)
+  const skyCanvas = document.createElement('canvas'); skyCanvas.width=1; skyCanvas.height=256;
+  const skyCtx = skyCanvas.getContext('2d');
+  const skyGrad = skyCtx.createLinearGradient(0,0,0,256);
+  skyGrad.addColorStop(0,'#050816'); skyGrad.addColorStop(1,'#0c1220');
+  skyCtx.fillStyle = skyGrad; skyCtx.fillRect(0,0,1,256);
+  scene.background = new THREE.CanvasTexture(skyCanvas);
+
+  // Iluminação
+  hemi = new THREE.HemisphereLight(0x222233, 0x050505, 0.35); scene.add(hemi);
+  dirLight = new THREE.DirectionalLight(0xffffff, 0.9);
+  dirLight.position.set(5,12,2);
+  dirLight.castShadow = true;
+  dirLight.shadow.camera.left = -30; dirLight.shadow.camera.right = 30;
+  dirLight.shadow.camera.top = 30; dirLight.shadow.camera.bottom = -30;
+  dirLight.shadow.mapSize.set(2048,2048);
+  scene.add(dirLight);
+
+  velocity = new THREE.Vector3();
+  directionVec = new THREE.Vector3();
+
+  // Inicia jogador, orbs e partículas
+  loadPhase(currentPhase, true);
+  spawnOrbs(14);
+  initParticleSystem();
+
+  // Input
+  window.addEventListener('resize', onResize);
+  document.addEventListener('keydown', e => keys[e.key.toLowerCase()] = true);
+  document.addEventListener('keyup', e => keys[e.key.toLowerCase()] = false);
+
+  startBtn.addEventListener('click', ()=> {
+    overlay.style.display = 'none';
+    startAudio(); // ativa áudio ambiente
+    running = true;
+    // primeira pequena notificação
+    setTimeout(()=>{notifEl.style.display='block'; notifEl.textContent = 'Bem-vindo, espírito'; setTimeout(()=>notifEl.style.display='none',1100)},200);
+  });
+}
+
+/* ----- Carrega fase: substitui mesh do jogador e atualiza luz ----- */
+function loadPhase(idx, initial=false){
+  if(player) scene.remove(player);
+
+  const ph = phases[idx];
+  // material com emissive sutil para sensação etérea
+  const mat = new THREE.MeshStandardMaterial({
+    color: ph.color, emissive: ph.color, emissiveIntensity: 0.08 + idx*0.5,
+    transparent: true, opacity: 0.95 - idx*0.06, roughness: 0.2, metalness: 0.1
+  });
+
+  // pequenas variações por fase: faz a "chama" rotacionar
+  player = new THREE.Mesh(ph.geometry, mat);
+  player.castShadow = true;
+  // ajustar escala e posição y dependendo da geometria
+  player.scale.setScalar(1 + idx*0.18);
+  player.position.set(0, 0.9 + idx*0.3, 0);
+
+  // efeito adicional: halo (sprite) — cria um Sprite para glow falso
+  const spriteMap = new THREE.CanvasTexture(makeGlowCanvas(ph.color));
+  const spriteMat = new THREE.SpriteMaterial({ map: spriteMap, color: 0xffffff, transparent: true, blending: THREE.AdditiveBlending });
+  const sprite = new THREE.Sprite(spriteMat);
+  sprite.scale.set(3 + idx*1.6, 3 + idx*1.6, 1);
+  sprite.position.set(0, player.position.y, 0);
+  player.add(sprite);
+
+  scene.add(player);
+
+  faseEl.textContent = ph.name;
+  xpmaxEl.textContent = nextXP.toFixed(0);
+
+  // iluminação e neblina por fase
+  updatePhaseLighting();
+
+  // se for inicial, pequeno pulse
+  if(initial) {
+    pulsePlayer(1.0 + idx*0.1);
+  }
+}
+
+/* cria uma textura de brilho circular via canvas */
+function makeGlowCanvas(hexColor){
+  const size = 128;
+  const c = document.createElement('canvas'); c.width = c.height = size;
+  const ctx = c.getContext('2d');
+  const grd = ctx.createRadialGradient(size/2,size/2,2, size/2,size/2,size/2);
+  const h = new THREE.Color(hexColor).getStyle();
+  grd.addColorStop(0, h);
+  grd.addColorStop(0.4, h);
+  grd.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = grd; ctx.fillRect(0,0,size,size);
+  return c;
+}
+
+/* anima um leve pulso no corpo (escala) */
+function pulsePlayer(targetScale){
+  const duration = 350;
+  const start = performance.now();
+  const baseScale = player.scale.x;
+  function step(t){
+    const p = (t - start)/duration;
+    if(p >= 1){
+      player.scale.setScalar(baseScale);
+      return;
+    }
+    // pulso com easing
+    const val = baseScale + (Math.sin(p * Math.PI) * 0.18 * (targetScale));
+    player.scale.setScalar(val);
+    requestAnimationFrame(step);
+  }
+  requestAnimationFrame(step);
+}
+
+/* Ajusta luz, cor do céu e intensidade por fase */
+function updatePhaseLighting(){
+  const ph = phases[currentPhase];
+  // dirLight toma a cor do emissive da forma (mais místico)
+  dirLight.color.set(new THREE.Color(ph.color));
+  dirLight.intensity = 0.55 + currentPhase*0.45;
+  hemi.intensity = 0.25 + currentPhase*0.15;
+
+  // fog e background — torna mais claro/etéreo conforme evolui
+  const fogColors = [0x050916, 0x0a0528, 0x02232a];
+  scene.fog.color.setHex(fogColors[currentPhase] || 0x02232a);
+
+  // muda background gradient levemente (apenas reinicia textura)
+  const skyCanvas = document.createElement('canvas'); skyCanvas.width=1; skyCanvas.height=256;
+  const skyCtx = skyCanvas.getContext('2d');
+  const skyGrad = skyCtx.createLinearGradient(0,0,0,256);
+  if(currentPhase === 0){
+    skyGrad.addColorStop(0,'#020215'); skyGrad.addColorStop(1,'#051026');
+  } else if(currentPhase === 1){
+    skyGrad.addColorStop(0,'#0b0133'); skyGrad.addColorStop(1,'#06041a');
+  } else {
+    skyGrad.addColorStop(0,'#012b2b'); skyGrad.addColorStop(1,'#04303a');
+  }
+  skyCtx.fillStyle = skyGrad; skyCtx.fillRect(0,0,1,256);
+  scene.background = new THREE.CanvasTexture(skyCanvas);
+}
+
+/* ----- Orbs (coletáveis) ----- */
+function spawnOrbs(n=12){
+  const orbGeo = new THREE.IcosahedronGeometry(0.28,1);
+  for(let i=0;i<n;i++){
+    const hue = 160 + Math.random()*120; // cores frias / místicas
+    const color = new THREE.Color(`hsl(${hue}, 85%, 60%)`);
+    const mat = new THREE.MeshStandardMaterial({
+      color: color,
+      emissive: color.clone().multiplyScalar(0.6),
+      emissiveIntensity: 0.9, roughness:0.1, metalness:0.2
+    });
+    const orb = new THREE.Mesh(orbGeo, mat);
+    orb.position.set((Math.random()-0.5)*60, 0.28, (Math.random()-0.5)*60);
+    orb.castShadow = true;
+    scene.add(orb);
+    orbs.push(orb);
+  }
+}
+
+/* ----- Sistema de partículas instanciadas (pequenas faíscas / poeira de energia) ----- */
+function initParticleSystem(){
+  const baseGeo = new THREE.SphereGeometry(0.04,6,6);
+  const geo = new THREE.InstancedBufferGeometry();
+  geo.copy(baseGeo);
+  // atributos offsets e scales
+  geo.setAttribute('offset', new THREE.InstancedBufferAttribute(new Float32Array(instancedParticleCount*3), 3));
+  geo.setAttribute('scale', new THREE.InstancedBufferAttribute(new Float32Array(instancedParticleCount), 1));
+  const mat = new THREE.MeshBasicMaterial({ color:0xffffff, transparent:true, blending:THREE.AdditiveBlending });
+  particleSystem = new THREE.InstancedMesh(geo, mat, instancedParticleCount);
+  scene.add(particleSystem);
+
+  for(let i=0;i<instancedParticleCount;i++){
+    particlePool.positions.push(new THREE.Vector3(0,-100,0));
+    particlePool.velocities.push(new THREE.Vector3());
+    particlePool.lifetimes.push(0);
+    particlePool.scales.push(0);
+  }
+}
+
+/* Spawn de partículas localizadas (explosão de energia colorida) */
+function spawnParticles(pos, colorHex = 0x9be7ff, amt = 30){
+  for(let i=0;i<amt;i++){
+    for(let j=0;j<instancedParticleCount;j++){
+      if(particlePool.lifetimes[j] <= 0){
+        particlePool.positions[j].set(
+          pos.x + (Math.random()-0.5)*0.6,
+          pos.y + (Math.random()-0.5)*0.3 + 0.2,
+          pos.z + (Math.random()-0.5)*0.6
+        );
+        particlePool.velocities[j].set(
+          (Math.random()-0.5)*0.6,
+          Math.random()*1.2,
+          (Math.random()-0.5)*0.6
+        );
+        particlePool.lifetimes[j] = 18 + Math.random()*24;
+        particlePool.scales[j] = 0.4 + Math.random()*0.9;
+        // set instance color via material color change per frame (simpler approach)
+        break;
+      }
+    }
+  }
+}
+
+/* partículas de poeira leve enquanto se move */
+function spawnDust(pos){
+  for(let i=0;i<4;i++){
+    for(let j=0;j<instancedParticleCount;j++){
+      if(particlePool.lifetimes[j] <= 0){
+        particlePool.positions[j].set(
+          pos.x + (Math.random()-0.5)*0.12,
+          0.06,
+          pos.z + (Math.random()-0.5)*0.12
+        );
+        particlePool.velocities[j].set(
+          (Math.random()-0.5)*0.02,
+          Math.random()*0.03 + 0.02,
+          (Math.random()-0.5)*0.02
+        );
+        particlePool.lifetimes[j] = 12 + Math.random()*12;
+        particlePool.scales[j] = 0.06 + Math.random()*0.08;
+        break;
+      }
+    }
+  }
+}
+
+/* atualiza partículas no mesh instanced */
+function updateParticles(){
+  const dummy = new THREE.Object3D();
+  for(let i=0;i<instancedParticleCount;i++){
+    if(particlePool.lifetimes[i] > 0){
+      // física básica
+      particlePool.positions[i].add(particlePool.velocities[i].clone().multiplyScalar(0.05));
+      particlePool.velocities[i].multiplyScalar(0.985);
+      particlePool.velocities[i].y -= 0.002; // gravidade sutil
+      particlePool.lifetimes[i] -= 1;
+
+      dummy.position.copy(particlePool.positions[i]);
+      const s = particlePool.scales[i] * Math.max(0.2, particlePool.lifetimes[i] / 30);
+      dummy.scale.setScalar(s);
+      dummy.updateMatrix();
+      particleSystem.setMatrixAt(i, dummy.matrix);
+    } else {
+      // push para fora da cena
+      dummy.position.set(0,-100,0); dummy.scale.setScalar(0.0001); dummy.updateMatrix();
+      particleSystem.setMatrixAt(i, dummy.matrix);
+    }
+  }
+  particleSystem.instanceMatrix.needsUpdate = true;
+  // fade global via material opacity (sutil)
+  particleSystem.material.opacity = 0.9;
+}
+
+/* ----- XP, Evolução e Notificações ----- */
+function gainXP(amount){
+  xp += amount;
+  xptextEl.textContent = xp.toFixed(0);
+  xpfillEl.style.width = (xp/nextXP*100) + '%';
+
+  if(xp >= nextXP && currentPhase < phases.length - 1){
+    xp = 0; nextXP *= 2; currentPhase++;
+    loadPhase(currentPhase);
+    notifEl.style.display = 'block';
+    notifEl.textContent = 'Evoluiu!';
+    setTimeout(()=> notifEl.style.display = 'none', 1200);
+    // efeito sonoro sutil na transição
+    playEvolutionTone();
+    // mais partículas para marcar evolução
+    spawnParticles(player.position, phases[currentPhase].color, 80);
+  }
+}
+
+/* ----- Áudio ambiente simples (WebAudio) ----- */
+function startAudio(){
+  if(audioCtx) return;
+  try{
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    masterGain = audioCtx.createGain(); masterGain.gain.value = 0.06;
+    masterGain.connect(audioCtx.destination);
+
+    // Oscilador ambiente (sinal contínuo com LFO)
+    ambientOsc = audioCtx.createOscillator();
+    ambientOsc.type = 'sine';
+    ambientOsc.frequency.value = 120; // base
+    const env = audioCtx.createGain(); env.gain.value = 0.0018;
+    ambientOsc.connect(env); env.connect(masterGain);
+    ambientOsc.start();
+
+    // LFO para variar a frequência lentamente
+    const lfo = audioCtx.createOscillator(); lfo.frequency.value = 0.18;
+    const lfoGain = audioCtx.createGain(); lfoGain.gain.value = 30;
+    lfo.connect(lfoGain); lfoGain.connect(ambientOsc.frequency);
+    lfo.start();
+  }catch(e){
+    console.warn('Audio não disponível:', e);
+  }
+}
+
+/* pequeno tom na evolução */
+function playEvolutionTone(){
+  if(!audioCtx) return;
+  const o = audioCtx.createOscillator(); o.type = 'sine';
+  const g = audioCtx.createGain(); g.gain.value = 0.0001;
+  o.connect(g); g.connect(masterGain);
+  o.frequency.value = 440 + currentPhase*120;
+  g.gain.setValueAtTime(0.00001, audioCtx.currentTime);
+  g.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.02);
+  g.gain.exponentialRampToValueAtTime(0.00001, audioCtx.currentTime + 0.5);
+  o.start(); o.stop(audioCtx.currentTime + 0.6);
+}
+
+/* ----- Loop principal / movimentação / colisões ----- */
+function animate(){
+  requestAnimationFrame(animate);
+  if(!running) return;
+
+  const delta = clock.getDelta();
+  directionVec.set(0,0,0);
+  if(keys['w']||keys['arrowup']) directionVec.z -= 1;
+  if(keys['s']||keys['arrowdown']) directionVec.z += 1;
+  if(keys['a']||keys['arrowleft']) directionVec.x -= 1;
+  if(keys['d']||keys['arrowright']) directionVec.x += 1;
+
+  if(directionVec.length() > 0){
+    directionVec.normalize();
+    velocity.add(directionVec.clone().multiplyScalar(accel));
+    if(velocity.length() > maxSpeed) velocity.setLength(maxSpeed);
+    // orientar "frente" do corpo para direção
+    player.rotation.y = Math.atan2(directionVec.x, directionVec.z);
+    // ganha XP levemente ao se mover
+    gainXP(0.04);
+    spawnDust(player.position);
+  } else {
+    velocity.multiplyScalar(friction);
+  }
+
+  // atualização posição
+  player.position.add(velocity);
+
+  // coleta de orbs
+  for(let i = orbs.length - 1; i >= 0; i--){
+    const orb = orbs[i];
+    orb.rotation.y += 0.02 + Math.sin(performance.now()*0.001)*0.004;
+    // atração sutil quando for próximo (efeito de "consumo")
+    const d = orb.position.distanceTo(player.position);
+    if(d < 6){
+      const dir = player.position.clone().sub(orb.position).setY(0).normalize();
+      orb.position.add(dir.multiplyScalar(0.05 * (6 - d)));
+    }
+    if(d < 1.0){
+      scene.remove(orb); orbs.splice(i, 1);
+      gainXP(6);
+      spawnParticles(orb.position, orb.material.emissive.getHex(), 36);
+    }
+  }
+
+  // respawn de orbs caso acabem
+  if(orbs.length < 6) spawnOrbs(6);
+
+  // câmera segue o jogador
+  const idealCam = player.position.clone().add(cameraOffset.clone().applyAxisAngle(new THREE.Vector3(0,1,0), player.rotation.y));
+  camera.position.lerp(idealCam, 0.08); camera.lookAt(player.position);
+
+  updateParticles();
+
+  renderer.render(scene, camera);
+}
+
+/* resize */
+function onResize(){
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+}
+
+/* inicializa animação */
+animate();
+
+/* ------- utilitários extras ------- */
+/* função pequena para 'pulsar' ao ganhar muito XP (visual) */
+function softPulse(){
+  const t0 = performance.now();
+  const dur = 600;
+  const s0 = player.scale.x;
+  (function frame(){
+    const p = (performance.now() - t0) / dur;
+    if(p >= 1) { player.scale.setScalar(s0); return; }
+    player.scale.setScalar(s0 + Math.sin(p * Math.PI) * 0.12);
+    requestAnimationFrame(frame);
+  })();
+}
+
+/* ---- tecla P para testar evolução manual (debug) ---- */
+document.addEventListener('keydown', (e)=>{
+  if(e.key.toLowerCase() === 'p'){
+    gainXP(nextXP + 1);
+    softPulse();
+  }
+});
+  </script>
+</body>
+</html>
