@@ -1,179 +1,551 @@
 <!DOCTYPE html>
 <html lang="pt-BR">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Evolução Humana – Dificuldade</title>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1.0" />
+<title>Espírito Primordial — Versão Final (Movimento Livre + Dificuldade)</title>
 <style>
-html,body{margin:0;padding:0;height:100%;overflow:hidden;background:#000;font-family:sans-serif;}
-canvas{display:block;}
-#hud{
-  position:absolute;left:12px;top:12px;
-  background:rgba(0,0,0,0.45);color:#fff;padding:10px 14px;
-  border-radius:10px;backdrop-filter:blur(4px);
-}
-#xpbar{width:220px;height:12px;background:#333;border-radius:6px;overflow:hidden;margin-top:6px;}
-#xpfill{height:100%;width:0%;background:linear-gradient(90deg,#86efac,#16a34a);transition:width 0.3s;}
-#notif{position:absolute;right:12px;top:12px;background:rgba(0,0,0,0.5);color:#fff;padding:10px;border-radius:8px;display:none;}
+  html,body{height:100%;margin:0;background:#000;overflow:hidden;font-family:Inter,Segoe UI,Arial,sans-serif}
+  canvas{display:block}
+  #hud{
+    position: absolute; left:12px; top:12px; z-index:50;
+    background: rgba(0,0,0,0.45); color:#fff; padding:10px 14px; border-radius:10px;
+    backdrop-filter: blur(4px);
+  }
+  #notif{position:absolute;right:12px;top:12px;color:#fff;background:rgba(0,0,0,0.35);padding:10px 14px;border-radius:10px;display:none}
+  #overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;z-index:40}
+  #overlay .card{background:rgba(0,0,0,0.6);padding:24px;border-radius:12px;color:#fff;text-align:center}
+  #overlay button{margin-top:12px;padding:10px 16px;border-radius:8px;border:0;background:#60a5fa;color:#012;font-weight:800;cursor:pointer}
+  @media (max-width:520px){#hud{left:8px;top:8px;padding:8px}}
 </style>
 </head>
 <body>
-<div id="hud">
-  <div><b>🌿 Fase:</b> <span id="fase">Carregando...</span></div>
-  <div><b>XP:</b> <span id="xptext">0</span> / <span id="xpmax">0</span></div>
-  <div id="xpbar"><div id="xpfill"></div></div>
-</div>
-<div id="notif">Evoluiu!</div>
+  <div id="hud">XP: <span id="xp">0</span> / <span id="xpmax">0</span> • Fase: <span id="fase">1</span> • Dificuldade: <span id="diff">MÉDIO</span></div>
+  <div id="notif">Evoluiu!</div>
+  <div id="overlay">
+    <div class="card">
+      <h2>Espírito Primordial</h2>
+      <p>WASD / ←↑→↓ para mover • Pressione <strong>D</strong> para alterar dificuldade</p>
+      <button id="startBtn">Iniciar</button>
+      <div style="font-size:13px;color:#cbd5e1;margin-top:8px">Toque/Click para ativar áudio</div>
+    </div>
+  </div>
 
-<script src="https://cdn.jsdelivr.net/npm/three@0.152.2/build/three.min.js"></script>
-<script>
-let scene,camera,renderer,clock;
-let player,velocity=new THREE.Vector3(),directionVec=new THREE.Vector3();
-let orbs=[],enemies=[];
-let keys={};
-let xp=0,nextXP=20,currentPhase=0;
-let dirLight;
+  <script src="https://cdn.jsdelivr.net/npm/three@0.152.2/build/three.min.js"></script>
+  <script>
+/* Versão final unificada
+   - Movimento livre no plano (estilo "flutuar")
+   - Dificuldade ajustável (D)
+   - Vento, orbes corrompidos, inimigos, partículas
+   - Pulso visual no emissive, sons por dificuldade
+*/
 
-const phases=[
-  {geometry:new THREE.BoxGeometry(1,2,1),color:0x8B4513,name:"Primitivo",enemyCount:2,speed:0.02},
-  {geometry:new THREE.CylinderGeometry(0.6,0.6,2,16),color:0x556B2F,name:"Intermediário",enemyCount:4,speed:0.03},
-  {geometry:new THREE.SphereGeometry(1,16,16),color:0x1E90FF,name:"Avançado",enemyCount:6,speed:0.045}
+/* ===== globals ===== */
+let scene, camera, renderer, clock;
+let player, velocity = new THREE.Vector3(), direction = new THREE.Vector3();
+let orbs = [], corruptedOrbs = [], enemies = [], particlePool = [];
+const instancedParticleCount = 300;
+let running = false;
+let currentPhase = 0, xp = 0, nextXP = 20;
+let windVec = new THREE.Vector3(0,0,0), windTimer = 0;
+let audioCtx, masterGain;
+
+/* HUD */
+const xpEl = document.getElementById('xp');
+const xpmaxEl = document.getElementById('xpmax');
+const faseEl = document.getElementById('fase');
+const diffEl = document.getElementById('diff');
+const notifEl = document.getElementById('notif');
+const overlay = document.getElementById('overlay');
+const startBtn = document.getElementById('startBtn');
+
+/* keys */
+let keys = {};
+window.addEventListener('keydown', e => keys[e.key.toLowerCase()] = true);
+window.addEventListener('keyup', e => keys[e.key.toLowerCase()] = false);
+
+/* difficulty system */
+const difficultyLevels = {
+  facil:   { wind: 0.05, enemySpeed: 0.008, enemyDamage: 2, orbCorrupted: 3, fogFactor:0.12, ambientGain:0.04, label:'FÁCIL' },
+  medio:   { wind: 0.10, enemySpeed: 0.012, enemyDamage: 4, orbCorrupted: 5, fogFactor:0.18, ambientGain:0.06, label:'MÉDIO' },
+  dificil: { wind: 0.15, enemySpeed: 0.018, enemyDamage: 6, orbCorrupted: 7, fogFactor:0.26, ambientGain:0.09, label:'DIFÍCIL' }
+};
+const diffKeys = Object.keys(difficultyLevels);
+let diffIndex = 1;
+let currentDifficulty = difficultyLevels[diffKeys[diffIndex]];
+diffEl.textContent = currentDifficulty.label;
+
+/* phases (kept simple) */
+const phases = [
+  { name:'Fagulha', color:0xff8a50 },
+  { name:'Forma Etérea', color:0x9b7cff },
+  { name:'Avatar de Luz', color:0x7efcff }
 ];
 
-const faseEl=document.getElementById("fase");
-const xptextEl=document.getElementById("xptext");
-const xpmaxEl=document.getElementById("xpmax");
-const xpfillEl=document.getElementById("xpfill");
-const notifEl=document.getElementById("notif");
-
+/* init */
+init();
 function init(){
-  scene=new THREE.Scene();
-  scene.background=new THREE.Color(0x87ceeb);
-  camera=new THREE.PerspectiveCamera(70,window.innerWidth/window.innerHeight,0.1,1000);
+  scene = new THREE.Scene();
+  camera = new THREE.PerspectiveCamera(65, innerWidth/innerHeight, 0.1, 1000);
   camera.position.set(0,3,8);
-  renderer=new THREE.WebGLRenderer({antialias:true});
-  renderer.setSize(window.innerWidth,window.innerHeight);
-  renderer.shadowMap.enabled=true;
+  renderer = new THREE.WebGLRenderer({ antialias:true });
+  renderer.setSize(innerWidth, innerHeight);
+  renderer.shadowMap.enabled = true;
   document.body.appendChild(renderer.domElement);
-  clock=new THREE.Clock();
+  clock = new THREE.Clock();
 
-  // Luz e chão
-  const hemi=new THREE.HemisphereLight(0x87ceeb,0x228b22,0.8); scene.add(hemi);
-  dirLight=new THREE.DirectionalLight(0xffffff,1); dirLight.position.set(5,10,5); dirLight.castShadow=true; scene.add(dirLight);
-  const ground=new THREE.Mesh(new THREE.PlaneGeometry(200,200),new THREE.MeshPhongMaterial({color:0x228b22}));
-  ground.rotation.x=-Math.PI/2; ground.receiveShadow=true; scene.add(ground);
+  // ground
+  const ground = new THREE.Mesh(new THREE.PlaneGeometry(400,400), new THREE.MeshStandardMaterial({ color:0x08120a }));
+  ground.rotation.x = -Math.PI/2; ground.receiveShadow = true; scene.add(ground);
 
-  loadPhase(currentPhase);
-  spawnOrbs(12);
-  window.addEventListener('resize',()=>{camera.aspect=window.innerWidth/window.innerHeight;camera.updateProjectionMatrix();renderer.setSize(window.innerWidth,window.innerHeight);});
-  document.addEventListener('keydown',e=>keys[e.key.toLowerCase()]=true);
-  document.addEventListener('keyup',e=>keys[e.key.toLowerCase()]=false);
+  // lighting
+  const hemi = new THREE.HemisphereLight(0x222233, 0x050505, 0.35); scene.add(hemi);
+  const dirLight = new THREE.DirectionalLight(0xffffff, 0.9); dirLight.position.set(5,12,2); dirLight.castShadow = true; scene.add(dirLight);
+
+  // player
+  const geo = new THREE.IcosahedronGeometry(0.6,2);
+  const mat = new THREE.MeshStandardMaterial({ color:phColor(0), emissive:phColor(0), emissiveIntensity:0.9, roughness:0.2, metalness:0.1, transparent:true });
+  player = new THREE.Mesh(geo, mat); player.position.set(0,0.9,0); player.castShadow = true; scene.add(player);
+
+  // start orbs, particles
+  spawnOrbs(18);
+  initParticlePool();
+  loadPhase(0,true);
+
+  // events
+  window.addEventListener('resize', onResize);
+  document.addEventListener('keydown', (e)=>{ if(e.key.toLowerCase() === 'd'){ cycleDifficulty(); } });
+  startBtn.addEventListener('click', startGame);
 }
 
-function loadPhase(idx){
-  if(player) scene.remove(player);
-  enemies.forEach(e=>scene.remove(e)); enemies=[];
-  const ph=phases[idx];
-  const mat=new THREE.MeshStandardMaterial({color:ph.color});
-  player=new THREE.Mesh(ph.geometry,mat);
-  player.castShadow=true; player.position.set(0,1,0);
-  scene.add(player);
-  spawnEnemies(ph.enemyCount);
-  faseEl.textContent=ph.name; xpmaxEl.textContent=nextXP;
+/* helper for phase color */
+function phColor(idx){ return new THREE.Color(phases[Math.min(idx,phases.length-1)].color); }
+
+/* start */
+function startGame(){
+  overlay.style.display = 'none';
+  running = true;
+  xp = 0; nextXP = 20; currentPhase = 0;
+  xpEl.textContent = xp; xpmaxEl.textContent = nextXP; faseEl.textContent = currentPhase+1;
+  startAudio();
+  setTimeout(()=>{ notifEl.style.display='block'; notifEl.textContent='Bem-vindo, espírito'; setTimeout(()=>notifEl.style.display='none',1200); },200);
 }
 
-function spawnOrbs(n){
+/* on resize */
+function onResize(){ camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); }
+
+/* ----------- Orbs ----------- */
+function spawnOrbs(n=12){
+  const geo = new THREE.IcosahedronGeometry(0.28,1);
   for(let i=0;i<n;i++){
-    const orb=new THREE.Mesh(new THREE.SphereGeometry(0.3,8,8),
-      new THREE.MeshStandardMaterial({color:0xffff00,emissive:0xffd700}));
-    orb.position.set((Math.random()-0.5)*60,0.3,(Math.random()-0.5)*60);
-    scene.add(orb); orbs.push(orb);
+    const hue = 160 + Math.random()*120;
+    const col = new THREE.Color(`hsl(${hue},85%,60%)`);
+    const mat = new THREE.MeshStandardMaterial({ color:col, emissive:col.clone().multiplyScalar(0.6), emissiveIntensity:0.9, roughness:0.1, metalness:0.2 });
+    const o = new THREE.Mesh(geo,mat);
+    o.position.set((Math.random()-0.5)*60,0.28,(Math.random()-0.5)*60);
+    o.castShadow = true; scene.add(o); orbs.push(o);
   }
 }
 
-function spawnEnemies(n){
-  const ph=phases[currentPhase];
+/* corrupted orbs */
+function spawnCorruptedOrbs(n=4){
+  const geo = new THREE.IcosahedronGeometry(0.32,1);
   for(let i=0;i<n;i++){
-    const enemy=new THREE.Mesh(
-      new THREE.SphereGeometry(0.5,12,12),
-      new THREE.MeshStandardMaterial({color:0xff0000,emissive:0x550000})
-    );
-    enemy.position.set((Math.random()-0.5)*40,0.5,(Math.random()-0.5)*40);
-    enemy.castShadow=true;
-    enemy.userData.speed=ph.speed+Math.random()*0.01;
-    scene.add(enemy); enemies.push(enemy);
+    const col = new THREE.Color(0xff3030);
+    const mat = new THREE.MeshStandardMaterial({ color:col, emissive:col.clone().multiplyScalar(0.6), emissiveIntensity:1.2, roughness:0.25, metalness:0.15 });
+    const o = new THREE.Mesh(geo,mat);
+    o.position.set((Math.random()-0.5)*50,0.28,(Math.random()-0.5)*50);
+    o.castShadow = true; scene.add(o); corruptedOrbs.push(o);
   }
 }
 
-function gainXP(v){xp+=v;if(xp<0)xp=0;
-  if(xp>=nextXP && currentPhase<phases.length-1){
-    xp=0; nextXP*=2; currentPhase++;
-    loadPhase(currentPhase);
-    notifEl.style.display='block';
-    setTimeout(()=>notifEl.style.display='none',1000);
+/* enemies */
+function spawnEnemies(n=3){
+  const geo = new THREE.SphereGeometry(0.8,16,16);
+  for(let i=0;i<n;i++){
+    const mat = new THREE.MeshStandardMaterial({ color:0x000000, emissive:0x1a0022, emissiveIntensity:0.8, roughness:0.8 });
+    const e = new THREE.Mesh(geo,mat);
+    e.position.set((Math.random()-0.5)*80,0.9,(Math.random()-0.5)*80);
+    e.userData = { velocity: new THREE.Vector3() };
+    e.castShadow = true; scene.add(e); enemies.push(e);
   }
-  xptextEl.textContent=xp.toFixed(0);
-  xpfillEl.style.width=(xp/nextXP*100)+'%';
 }
 
-function flashPlayer(){
-  const old=player.material.color.getHex();
-  player.material.color.set(0xffffff);
-  setTimeout(()=>player.material.color.set(old),150);
-}
-
-function animate(){
-  requestAnimationFrame(animate);
-  const delta=clock.getDelta();
-  const moveSpeed=0.12;
-
-  // Movimento
-  directionVec.set(0,0,0);
-  if(keys['w']||keys['arrowup']) directionVec.z-=1;
-  if(keys['s']||keys['arrowdown']) directionVec.z+=1;
-  if(keys['a']||keys['arrowleft']) directionVec.x-=1;
-  if(keys['d']||keys['arrowright']) directionVec.x+=1;
-  if(directionVec.length()>0){
-    directionVec.normalize();
-    player.position.addScaledVector(directionVec,moveSpeed);
-    player.rotation.y=Math.atan2(directionVec.x,directionVec.z);
-    gainXP(0.02);
+/* ----------- particles pool (simple array of objects for visual effects) ----------- */
+function initParticlePool(){
+  for(let i=0;i<instancedParticleCount;i++){
+    particlePool.push({ pos: new THREE.Vector3(0,-100,0), vel: new THREE.Vector3(), life:0, color:0xffffff, size:0.06 });
   }
-
-  // Coleta orbes
-  for(let i=orbs.length-1;i>=0;i--){
-    const orb=orbs[i];
-    orb.rotation.y+=0.02;
-    if(orb.position.distanceTo(player.position)<1){
-      scene.remove(orb); orbs.splice(i,1); gainXP(5);
+}
+function spawnParticles(pos, colorHex=0x9be7ff, amount=20){
+  for(let i=0;i<particlePool.length && amount>0;i++){
+    const p = particlePool[i];
+    if(p.life <= 0){
+      p.pos.set(pos.x + (Math.random()-0.5)*0.6, pos.y + 0.2 + (Math.random()-0.5)*0.2, pos.z + (Math.random()-0.5)*0.6);
+      p.vel.set((Math.random()-0.5)*0.6, Math.random()*1.0, (Math.random()-0.5)*0.6);
+      p.life = 0.6 + Math.random()*0.8; p.color = colorHex; p.size = 0.04 + Math.random()*0.12;
+      amount--;
     }
   }
+}
 
-  // Inimigos
-  enemies.forEach(enemy=>{
-    const dir=player.position.clone().sub(enemy.position);
-    const dist=dir.length();
-    if(dist>0.1) dir.normalize();
-    enemy.position.addScaledVector(dir,enemy.userData.speed);
-    enemy.lookAt(player.position);
-    if(dist<1.2){
-      gainXP(-5);
-      flashPlayer();
-      enemy.position.x+=(Math.random()-0.5)*4;
-      enemy.position.z+=(Math.random()-0.5)*4;
+/* ----------- wind & environment ----------- */
+function updateWind(delta){
+  if(currentPhase >= 1){
+    windTimer -= delta;
+    if(windTimer <= 0){
+      windTimer = 8 + Math.random()*6;
+      windVec.set((Math.random()-0.5)*currentDifficulty.wind, 0, (Math.random()-0.5)*currentDifficulty.wind);
+    }
+    // apply small continuous push
+    velocity.add(windVec.clone().multiplyScalar(0.5));
+    // spawn tiny drifting particles to indicate wind
+    if(Math.random() < 0.06) spawnParticles(player.position, 0x88ccff, 2);
+  } else {
+    windVec.set(0,0,0);
+  }
+}
+
+/* ----------- enemies behavior ----------- */
+function updateEnemies(delta){
+  if(currentPhase < 2) return;
+  enemies.forEach(e => {
+    const dir = player.position.clone().sub(e.position);
+    const dist = dir.length();
+    if(dist > 0.001) dir.normalize();
+    e.userData.velocity.add(dir.multiplyScalar(currentDifficulty.enemySpeed));
+    e.userData.velocity.multiplyScalar(0.96);
+    e.position.add(e.userData.velocity);
+    e.rotation.y += 0.02;
+    // drain if near
+    if(dist < 1.4){
+      gainXP(-currentDifficulty.enemyDamage * delta * 8); // scaled by delta for smooth drain
+      // push player slightly away
+      const push = e.position.clone().sub(player.position).setY(0).normalize().multiplyScalar(0.6);
+      velocity.add(push);
+      spawnParticles(player.position, 0xaa0033, 6);
     }
   });
-
-  // Câmera
-  const target=player.position.clone().add(new THREE.Vector3(0,3,-6));
-  camera.position.lerp(target,0.1);
-  camera.lookAt(player.position);
-
-  renderer.render(scene,camera);
 }
 
-init();
+/* ----------- movement (free in XZ plane) ----------- */
+function updateMovement(delta){
+  const dir = new THREE.Vector3();
+  if(keys['w'] || keys['arrowup']) dir.z -= 1;
+  if(keys['s'] || keys['arrowdown']) dir.z += 1;
+  if(keys['a'] || keys['arrowleft']) dir.x -= 1;
+  if(keys['d'] || keys['arrowright']) dir.x += 1;
+  if(dir.length() > 0){
+    dir.normalize();
+    // base acceleration scales with delta to keep consistent frame-rate
+    const accel = 6.0 * delta;
+    velocity.add(dir.multiplyScalar(accel));
+    // orientation
+    player.rotation.y = Math.atan2(dir.x, dir.z);
+  }
+  // friction / soft damping so it feels like floaty inertia
+  velocity.multiplyScalar(0.92);
+  // cap horizontal speed
+  const max = 1.8;
+  const hv = new THREE.Vector3(velocity.x, 0, velocity.z);
+  if(hv.length() > max){
+    hv.setLength(max);
+    velocity.x = hv.x; velocity.z = hv.z;
+  }
+  // ensure player stays at constant height (free-floating)
+  player.position.add(velocity);
+  player.position.y = 0.9; // lock to float height
+  // emissive pulsing based on movement
+  const pulse = Math.sin(clock.elapsedTime * 6) * 0.25 + 0.75;
+  const em = 0.8 + hv.length() * 0.9 + pulse * 0.18;
+  if(player.material) player.material.emissiveIntensity = em;
+}
+
+/* ----------- XP and evolution ----------- */
+function gainXP(amount){
+  // amount can be fractional, clamp to avoid negative spam
+  if(amount < 0 && xp <= 0) return;
+  xp += amount;
+  if(xp < 0) xp = 0;
+  if(xp >= nextXP && currentPhase < phases.length - 1){
+    xp = 0; nextXP *= 2; currentPhase++;
+    loadPhase(currentPhase);
+    notifEl.style.display = 'block'; notifEl.textContent = 'Evoluiu!';
+    setTimeout(()=> notifEl.style.display='none', 1200);
+    spawnParticles(player.position, phases[currentPhase].color, 60);
+    playEvolutionTone();
+  }
+  xpEl.textContent = Math.round(xp);
+  xpmaxEl.textContent = Math.round(nextXP);
+  faseEl.textContent = currentPhase + 1;
+}
+
+/* load phase */
+function loadPhase(idx, initial=false){
+  currentPhase = idx;
+  // update player color/emissive
+  if(player && player.material){
+    const c = phColor(Math.min(idx, phases.length-1));
+    player.material.color.copy(c);
+    player.material.emissive.copy(c);
+  }
+  // spawn challenges by phase
+  if(currentPhase === 1 && corruptedOrbs.length === 0){
+    spawnCorruptedOrbs(currentDifficulty.orbCorrupted);
+  }
+  if(currentPhase === 2 && enemies.length === 0){
+    spawnEnemies(Math.max(3, Math.round(currentDifficulty.orbCorrupted/2)));
+  }
+}
+
+/* cycle difficulty */
+function cycleDifficulty(){
+  diffIndex = (diffIndex + 1) % diffKeys.length;
+  currentDifficulty = difficultyLevels[diffKeys[diffIndex]];
+  diffEl.textContent = currentDifficulty.label;
+  // immediate small visual/sound feedback
+  playDifficultySwoosh();
+}
+
+/* apply small environment changes when difficulty changes (fog/ambient) */
+function applyDifficultyEnvironment(){
+  const fogCol = new THREE.Color(0x01202a).lerp(new THREE.Color(0x050100), diffIndex * 0.25);
+  scene.fog = new THREE.FogExp2(fogCol.getHex(), currentDifficulty.fogFactor);
+  if(masterGain) masterGain.gain.value = currentDifficulty.ambientGain;
+}
+
+/* ----------- audio (simple WebAudio ambient + tones) ----------- */
+function startAudio(){
+  if(audioCtx) return;
+  try{
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    masterGain = audioCtx.createGain(); masterGain.gain.value = currentDifficulty.ambientGain; masterGain.connect(audioCtx.destination);
+
+    // ambient drone using two oscillators with slow LFO
+    const o1 = audioCtx.createOscillator(); o1.type = 'sine'; o1.frequency.value = 110;
+    const g1 = audioCtx.createGain(); g1.gain.value = 0.002;
+    o1.connect(g1); g1.connect(masterGain); o1.start();
+
+    const o2 = audioCtx.createOscillator(); o2.type = 'sine'; o2.frequency.value = 155;
+    const g2 = audioCtx.createGain(); g2.gain.value = 0.0016;
+    o2.connect(g2); g2.connect(masterGain); o2.start();
+
+    // subtle LFO to modulate amplitude
+    const lfo = audioCtx.createOscillator(); lfo.frequency.value = 0.08;
+    const lfoGain = audioCtx.createGain(); lfoGain.gain.value = 0.0012;
+    lfo.connect(lfoGain); lfoGain.connect(g1.gain); lfo.start();
+
+    // store references for future modulation if needed
+    audioCtx._o1 = o1; audioCtx._o2 = o2;
+  }catch(e){
+    console.warn('Audio não disponível:', e);
+  }
+}
+
+function playEvolutionTone(){
+  if(!audioCtx) return;
+  const o = audioCtx.createOscillator(); o.type = 'sine';
+  const g = audioCtx.createGain(); g.gain.value = 0.0001;
+  o.connect(g); g.connect(masterGain);
+  o.frequency.value = 440 + currentPhase * 120;
+  g.gain.setValueAtTime(0.00001, audioCtx.currentTime);
+  g.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.02);
+  g.gain.exponentialRampToValueAtTime(0.00001, audioCtx.currentTime + 0.6);
+  o.start(); o.stop(audioCtx.currentTime + 0.7);
+}
+
+function playShortNegativeTone(){
+  if(!audioCtx) return;
+  const o = audioCtx.createOscillator(); o.type = 'triangle';
+  const g = audioCtx.createGain(); g.gain.value = 0.00005;
+  o.connect(g); g.connect(masterGain);
+  o.frequency.value = 160;
+  g.gain.setValueAtTime(0.00001, audioCtx.currentTime);
+  g.gain.exponentialRampToValueAtTime(0.004, audioCtx.currentTime + 0.01);
+  g.gain.exponentialRampToValueAtTime(0.00001, audioCtx.currentTime + 0.18);
+  o.start(); o.stop(audioCtx.currentTime + 0.22);
+}
+
+function playDifficultySwoosh(){
+  if(!audioCtx) return;
+  const o = audioCtx.createOscillator(); o.type = 'sawtooth';
+  const g = audioCtx.createGain(); g.gain.value = 0.00005;
+  o.connect(g); g.connect(masterGain);
+  o.frequency.value = 220 + diffIndex * 120;
+  g.gain.setValueAtTime(0.00001, audioCtx.currentTime);
+  g.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.02);
+  g.gain.exponentialRampToValueAtTime(0.00001, audioCtx.currentTime + 0.35);
+  o.start(); o.stop(audioCtx.currentTime + 0.4);
+}
+
+/* ----------- utility: small spawn of corrompidos over time when in phase 1 ----------- */
+let corruptSpawnTimer = 0;
+
+/* ----------- main loop ----------- */
+function animate(){
+  requestAnimationFrame(animate);
+  if(!running) return;
+  const delta = Math.min(0.05, clock.getDelta());
+
+  // environment/difficulty adjustments
+  applyDifficultyEnvironment();
+  updateWind(delta);
+
+  // movement & physics
+  updateMovement(delta);
+
+  // orbs behavior: slight rotation + attraction when close
+  for(let i=orbs.length-1;i>=0;i--){
+    const o = orbs[i];
+    o.rotation.y += 0.015;
+    const d = o.position.distanceTo(player.position);
+    if(d < 6){
+      const pull = player.position.clone().sub(o.position).setY(0).normalize().multiplyScalar(0.04 * (6 - d));
+      o.position.add(pull);
+    }
+    if(d < 1.0){
+      scene.remove(o); orbs.splice(i,1);
+      gainXP(6);
+      spawnParticles(o.position, o.material.emissive.getHex(), 36);
+    }
+  }
+
+  // corrupted orbs
+  for(let i=corruptedOrbs.length-1;i>=0;i--){
+    const o = corruptedOrbs[i];
+    o.rotation.y += 0.02;
+    const d = o.position.distanceTo(player.position);
+    if(d < 6){
+      const pull = player.position.clone().sub(o.position).setY(0).normalize().multiplyScalar(0.03 * (6 - d));
+      o.position.add(pull);
+    }
+    if(d < 1.0){
+      scene.remove(o); corruptedOrbs.splice(i,1);
+      gainXP(-currentDifficulty.enemyDamage * 1.25); // penalty scaled with difficulty
+      spawnParticles(o.position, 0xff2020, 50);
+      playShortNegativeTone();
+    }
+  }
+
+  // respawn orbs if few
+  if(orbs.length < 6) spawnOrbs(6);
+
+  // spawn occasional corrupted while in phase 1
+  if(currentPhase === 1){
+    corruptSpawnTimer -= delta;
+    if(corruptSpawnTimer <= 0){
+      corruptSpawnTimer = 3 + Math.random()*6;
+      if(corruptedOrbs.length < Math.max(2, currentDifficulty.orbCorrupted)) spawnCorruptedOrbs(1);
+    }
+  }
+
+  // enemies
+  updateEnemies(delta);
+
+  // update particle pool
+  for(let i=0;i<particlePool.length;i++){
+    const p = particlePool[i];
+    if(p.life > 0){
+      p.pos.add(p.vel.clone().multiplyScalar(delta * 60 * 0.01));
+      p.vel.multiplyScalar(0.98);
+      p.vel.y -= 0.02;
+      p.life -= delta;
+      // visualizing particles via simple temporary meshes would be expensive; use small sprites if needed.
+      // For now we don't explicitly render them to keep performance (they are logical placeholders for spawn effects).
+    }
+  }
+
+  // camera follow
+  const ideal = player.position.clone().add(new THREE.Vector3(0,2.4,-5).applyAxisAngle(new THREE.Vector3(0,1,0), player.rotation.y));
+  camera.position.lerp(ideal, 0.08);
+  camera.lookAt(player.position);
+
+  renderer.render(scene, camera);
+}
+
+/* initial call (loop runs but waits for start) */
 animate();
-</script>
+
+/* ======= debug/test helpers & small improvements ======= */
+/* cycle difficulty key already set to D; expose function to set difficulty programmatically if desired */
+function setDifficultyByKey(key){
+  const idx = diffKeys.indexOf(key);
+  if(idx >= 0){ diffIndex = idx; currentDifficulty = difficultyLevels[diffKeys[diffIndex]]; diffEl.textContent = currentDifficulty.label; applyDifficultyEnvironment(); }
+}
+
+/* small tones */
+function playShortPositive(){ if(audioCtx) playEvolutionTone(); }
+
+/* ======= helper UI & audio adjustments on difficulty change ======= */
+function cycleDifficulty(){ // override earlier to also alter audio gain and spawn rates
+  diffIndex = (diffIndex + 1) % diffKeys.length;
+  currentDifficulty = difficultyLevels[diffKeys[diffIndex]];
+  diffEl.textContent = currentDifficulty.label;
+  if(masterGain) masterGain.gain.value = currentDifficulty.ambientGain;
+  // feedback
+  playDifficultySwoosh();
+}
+
+/* ======= ensure functions used earlier exist (some were declared lower) ======= */
+/* playDifficultySwoosh declared earlier in original code context; add minimal here */
+function playDifficultySwoosh(){ if(!audioCtx) return; const o = audioCtx.createOscillator(); const g = audioCtx.createGain(); o.type='sine'; o.frequency.value = 240 + diffIndex*80; g.gain.value = 0.00005; o.connect(g); g.connect(masterGain); g.gain.setValueAtTime(0.00001, audioCtx.currentTime); g.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.02); g.gain.exponentialRampToValueAtTime(0.00001, audioCtx.currentTime + 0.28); o.start(); o.stop(audioCtx.currentTime + 0.32); }
+
+/* ======= small particle spawn wrapper used above ======= */
+function spawnParticles(pos, colorHex=0x9be7ff, amount=20){
+  // uses the pool logically; if you want visual particles, you can add Points/InstancedMesh here.
+  for(let i=0;i<particlePool.length && amount>0;i++){
+    const p = particlePool[i];
+    if(p.life <= 0){
+      p.pos.set(pos.x + (Math.random()-0.5)*0.6, pos.y + 0.2 + (Math.random()-0.5)*0.3, pos.z + (Math.random()-0.5)*0.6);
+      p.vel.set((Math.random()-0.5)*0.6, Math.random()*1.2, (Math.random()-0.5)*0.6);
+      p.life = 0.28 + Math.random()*0.6;
+      p.color = colorHex;
+      amount--;
+    }
+  }
+}
+
+/* ======= small functions referenced earlier ======= */
+function spawnCorruptedOrbs(n=1){ spawnCorruptedOrbsImpl(n); }
+function spawnCorruptedOrbsImpl(n){
+  const geo = new THREE.IcosahedronGeometry(0.32,1);
+  for(let i=0;i<n;i++){
+    const col = new THREE.Color(0xff3030);
+    const mat = new THREE.MeshStandardMaterial({ color:col, emissive:col.clone().multiplyScalar(0.6), emissiveIntensity:1.2, roughness:0.25, metalness:0.15 });
+    const o = new THREE.Mesh(geo,mat);
+    o.position.set((Math.random()-0.5)*50,0.28,(Math.random()-0.5)*50);
+    o.castShadow = true; scene.add(o); corruptedOrbs.push(o);
+  }
+}
+/* alias to avoid hoisting issues */
+function spawnEnemies(n){ spawnEnemiesImpl(n); }
+function spawnEnemiesImpl(n){
+  const geo = new THREE.SphereGeometry(0.8,16,16);
+  for(let i=0;i<n;i++){
+    const mat = new THREE.MeshStandardMaterial({ color:0x000000, emissive:0x1a0022, emissiveIntensity:0.8, roughness:0.8 });
+    const e = new THREE.Mesh(geo,mat);
+    e.position.set((Math.random()-0.5)*80,0.9,(Math.random()-0.5)*80);
+    e.userData = { velocity: new THREE.Vector3() };
+    e.castShadow = true; scene.add(e); enemies.push(e);
+  }
+}
+
+/* ======= ensure applyDifficultyEnvironment defined (simple) ======= */
+function applyDifficultyEnvironment(){
+  const v = currentDifficulty.fogFactor;
+  const fogCol = new THREE.Color(0x01202a).lerp(new THREE.Color(0x020010), diffIndex*0.2);
+  scene.fog = new THREE.FogExp2(fogCol.getHex(), v);
+  if(masterGain) masterGain.gain.value = currentDifficulty.ambientGain;
+}
+
+/* ======= small debug helper to ensure audio functions exist ======= */
+function playShortNegativeTone(){ if(!audioCtx)return; const o=audioCtx.createOscillator(); const g=audioCtx.createGain(); o.type='triangle'; g.gain.value=0.00005; o.connect(g); g.connect(masterGain); o.frequency.value=140; g.gain.setValueAtTime(0.00001,audioCtx.currentTime); g.gain.exponentialRampToValueAtTime(0.005,audioCtx.currentTime+0.01); g.gain.exponentialRampToValueAtTime(0.00001,audioCtx.currentTime+0.2); o.start(); o.stop(audioCtx.currentTime+0.23); }
+
+/* ======= finalize: make cycleDifficulty available globally for D key (already attached) ======= */
+window.cycleDifficulty = cycleDifficulty;
+
+/* Note: This file focuses on mechanics. If you want visual wind sprites (leaves) or GPU distortion shaders,
+   I can add a lightweight Points layer or a postprocessing pass next. */
+  </script>
 </body>
 </html>
